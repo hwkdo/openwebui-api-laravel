@@ -1,12 +1,12 @@
 <?php
 
-namespace VendorName\Skeleton\Commands;
+namespace Hwkdo\OpenwebuiApiLaravel\Commands;
 
 use Illuminate\Console\Command;
 
-class SkeletonCommand extends Command
+class OpenwebuiApiLaravelCommand extends Command
 {
-    public $signature = 'skeleton';
+    public $signature = 'openwebui-api-laravel';
 
     public $description = 'My command';
 
