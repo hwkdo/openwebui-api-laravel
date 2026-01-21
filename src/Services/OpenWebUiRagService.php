@@ -34,12 +34,15 @@ class OpenWebUiRagService
             throw new \Exception("Datei nicht gefunden: {$filePath}");
         }
 
+        $url = $this->url.'/v1/files/';
+
         $result = $this->client->asMultipart()
-            ->attach('file', file_get_contents($filePath), basename($filePath))
-            ->post($this->url.'/v1/files/', [
+            ->withQueryParameters([
                 'process' => $process,
                 'process_in_background' => $processInBackground,
-            ]);
+            ])
+            ->attach('file', file_get_contents($filePath), basename($filePath))
+            ->post($url);
 
         if (! $result->successful()) {
             throw new \Exception('Upload fehlgeschlagen: '.$result->status().' - '.$result->body());
@@ -115,7 +118,17 @@ class OpenWebUiRagService
         ]);
 
         if (! $result->successful()) {
-            throw new \Exception('Hinzufügen zur Knowledge Collection fehlgeschlagen: '.$result->status().' - '.$result->body());
+            $errorBody = $result->body();
+            $errorMessage = 'Hinzufügen zur Knowledge Collection fehlgeschlagen: '.$result->status().' - '.$errorBody;
+            
+            // Wenn "Duplicate content" kommt, bedeutet das, dass der Inhalt bereits verarbeitet wurde
+            // Aber die Datei selbst könnte trotzdem nicht in der Collection sein
+            // Wir werfen eine spezielle Exception, damit der Caller entscheiden kann, wie damit umzugehen ist
+            if (str_contains($errorBody, 'Duplicate content') || str_contains($errorBody, 'duplicate')) {
+                throw new \Exception('Duplicate content: '.$errorMessage);
+            }
+            
+            throw new \Exception($errorMessage);
         }
 
         return $result->json();
@@ -213,5 +226,87 @@ class OpenWebUiRagService
         if (! $result->successful()) {
             throw new \Exception('Löschen der Datei fehlgeschlagen: '.$result->status().' - '.$result->body());
         }
+    }
+
+    /**
+     * Entfernt eine Datei aus einer Knowledge Collection und löscht sie optional
+     *
+     * @param  string  $knowledgeId  Die ID der Knowledge Collection
+     * @param  string  $fileId  Die ID der zu entfernenden Datei
+     * @param  bool  $deleteFile  Ob die Datei auch gelöscht werden soll (Standard: true)
+     *
+     * @throws \Exception
+     */
+    public function removeFileFromKnowledge(string $knowledgeId, string $fileId, bool $deleteFile = true): array
+    {
+        $url = $this->url.'/v1/knowledge/'.$knowledgeId.'/file/remove';
+
+        $result = $this->client->asJson()
+            ->withQueryParameters(['delete_file' => $deleteFile])
+            ->post($url, [
+                'file_id' => $fileId,
+            ]);
+
+        if (! $result->successful()) {
+            throw new \Exception('Entfernen der Datei aus Knowledge Collection fehlgeschlagen: '.$result->status().' - '.$result->body());
+        }
+
+        return $result->json();
+    }
+
+    /**
+     * Reindiziert die Dateien einer Knowledge Collection
+     * Hinweis: Laut OpenAPI-Spezifikation akzeptiert dieser Endpunkt keine Parameter
+     * und reindiziert alle Knowledge Bases. Falls eine spezifische Collection reindiziert
+     * werden soll, wird die knowledge_id als Query-Parameter übergeben (falls unterstützt).
+     *
+     * @param  string|null  $knowledgeId  Optional: Die ID der Knowledge Collection
+     *
+     * @throws \Exception
+     */
+    public function reindexKnowledgeFiles(?string $knowledgeId = null): bool
+    {
+        $url = $this->url.'/v1/knowledge/reindex';
+
+        if ($knowledgeId) {
+            $result = $this->client->withQueryParameters(['knowledge_id' => $knowledgeId])
+                ->post($url);
+        } else {
+            $result = $this->client->post($url);
+        }
+
+        if (! $result->successful()) {
+            throw new \Exception('Reindexierung der Knowledge Collection fehlgeschlagen: '.$result->status().' - '.$result->body());
+        }
+
+        return $result->json() === true || $result->json() === 'true';
+    }
+
+    /**
+     * Reindiziert die Metadaten-Embeddings einer Knowledge Collection
+     * Hinweis: Laut OpenAPI-Spezifikation akzeptiert dieser Endpunkt keine Parameter
+     * und reindiziert alle Knowledge Bases. Falls eine spezifische Collection reindiziert
+     * werden soll, wird die knowledge_id als Query-Parameter übergeben (falls unterstützt).
+     *
+     * @param  string|null  $knowledgeId  Optional: Die ID der Knowledge Collection
+     *
+     * @throws \Exception
+     */
+    public function reindexKnowledgeMetadata(?string $knowledgeId = null): array
+    {
+        $url = $this->url.'/v1/knowledge/metadata/reindex';
+
+        if ($knowledgeId) {
+            $result = $this->client->withQueryParameters(['knowledge_id' => $knowledgeId])
+                ->post($url);
+        } else {
+            $result = $this->client->post($url);
+        }
+
+        if (! $result->successful()) {
+            throw new \Exception('Reindexierung der Knowledge Collection Metadaten fehlgeschlagen: '.$result->status().' - '.$result->body());
+        }
+
+        return $result->json();
     }
 }
