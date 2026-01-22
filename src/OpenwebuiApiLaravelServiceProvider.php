@@ -3,8 +3,12 @@
 namespace Hwkdo\OpenwebuiApiLaravel;
 
 use Hwkdo\OpenwebuiApiLaravel\Commands\OpenwebuiApiLaravelCommand;
+use Hwkdo\OpenwebuiApiLaravel\Listeners\SetOpenWebUiSystemPromptOnTokenCreated;
 use Hwkdo\OpenwebuiApiLaravel\Services\OpenWebUiCompletionService;
 use Hwkdo\OpenwebuiApiLaravel\Services\OpenWebUiRagService;
+use Hwkdo\OpenwebuiApiLaravel\Services\OpenWebUiUserService;
+use Illuminate\Support\Facades\Event;
+use Laravel\Passport\Events\AccessTokenCreated;
 use Spatie\LaravelPackageTools\Package;
 use Spatie\LaravelPackageTools\PackageServiceProvider;
 
@@ -34,5 +38,14 @@ class OpenwebuiApiLaravelServiceProvider extends PackageServiceProvider
         $this->app->singleton(OpenWebUiCompletionService::class, function ($app) {
             return new OpenWebUiCompletionService();
         });
+
+        $this->app->singleton(OpenWebUiUserService::class, function ($app) {
+            return new OpenWebUiUserService();
+        });
+    }
+
+    public function packageBooted(): void
+    {
+        Event::listen(AccessTokenCreated::class, SetOpenWebUiSystemPromptOnTokenCreated::class);
     }
 }
