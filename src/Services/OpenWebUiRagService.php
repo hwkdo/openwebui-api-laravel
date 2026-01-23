@@ -120,14 +120,14 @@ class OpenWebUiRagService
         if (! $result->successful()) {
             $errorBody = $result->body();
             $errorMessage = 'Hinzufügen zur Knowledge Collection fehlgeschlagen: '.$result->status().' - '.$errorBody;
-            
+
             // Wenn "Duplicate content" kommt, bedeutet das, dass der Inhalt bereits verarbeitet wurde
             // Aber die Datei selbst könnte trotzdem nicht in der Collection sein
             // Wir werfen eine spezielle Exception, damit der Caller entscheiden kann, wie damit umzugehen ist
             if (str_contains($errorBody, 'Duplicate content') || str_contains($errorBody, 'duplicate')) {
                 throw new \Exception('Duplicate content: '.$errorMessage);
             }
-            
+
             throw new \Exception($errorMessage);
         }
 
