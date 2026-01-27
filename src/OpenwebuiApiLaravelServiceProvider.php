@@ -47,5 +47,15 @@ class OpenwebuiApiLaravelServiceProvider extends PackageServiceProvider
     public function packageBooted(): void
     {
         Event::listen(AccessTokenCreated::class, SetOpenWebUiSystemPromptOnTokenCreated::class);
+
+        // Register custom Prism provider for OpenWebUI Completions API
+        if ($this->app->bound('prism-manager')) {
+            $this->app['prism-manager']->extend('openwebui-completions', function ($app, $config) {
+                return new \Hwkdo\OpenwebuiApiLaravel\Prism\Providers\OpenAICompletions(
+                    apiKey: $config['api_key'] ?? '',
+                    baseUrl: $config['base_url'] ?? '',
+                );
+            });
+        }
     }
 }
