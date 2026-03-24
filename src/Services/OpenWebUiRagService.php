@@ -8,15 +8,23 @@ class OpenWebUiRagService
 {
     protected string $url;
 
-    protected \Illuminate\Http\Client\PendingRequest $client;
-
     public function __construct()
     {
         $this->url = config('openwebui-api-laravel.base_api_url');
-        $this->client = Http::withHeaders([
+    }
+
+    /**
+     * Erstellt jedes Mal einen frischen PendingRequest.
+     * Ein gespeichertes PendingRequest-Objekt würde durch verkettete Methoden wie
+     * asJson(), withQueryParameters() etc. permanent mutiert (Laravel nutzt tap($this, ...)),
+     * was bei Singletons zu akkumulierten Query-Params und falschen Content-Types führt.
+     */
+    private function client(int $timeout = 30): \Illuminate\Http\Client\PendingRequest
+    {
+        return Http::withHeaders([
             'Authorization' => 'Bearer '.config('openwebui-api-laravel.api_key'),
             'Accept' => 'application/json',
-        ]);
+        ])->timeout($timeout);
     }
 
     /**
@@ -34,14 +42,26 @@ class OpenWebUiRagService
             throw new \Exception("Datei nicht gefunden: {$filePath}");
         }
 
-        $url = $this->url.'/v1/files/';
+        // Query-Params direkt in die URL einbauen – withQueryParameters() nach attach()
+        // kann den Attachment-State im PendingRequest verlieren.
+        $query = http_build_query(array_filter([
+            'process' => $process ? 'true' : null,
+            'process_in_background' => $processInBackground ? 'true' : null,
+        ]));
+        $url = $this->url.'/v1/files/'.($query ? '?'.$query : '');
 
-        $result = $this->client->asMultipart()
-            ->withQueryParameters([
-                'process' => $process,
-                'process_in_background' => $processInBackground,
-            ])
-            ->attach('file', file_get_contents($filePath), basename($filePath))
+        $fileContents = file_get_contents($filePath);
+        if ($fileContents === false || $fileContents === '') {
+            throw new \Exception("Datei ist leer oder nicht lesbar: {$filePath}");
+        }
+
+        // Frisches Http-Objekt – gespeicherter PendingRequest ($this->client) kann
+        // bei Multipart-Uploads internen State aus vorherigen Anfragen mitschleppen.
+        $result = Http::withHeaders([
+            'Authorization' => 'Bearer '.config('openwebui-api-laravel.api_key'),
+            'Accept' => 'application/json',
+        ])
+            ->attach('file', $fileContents, basename($filePath))
             ->post($url);
 
         if (! $result->successful()) {
@@ -61,7 +81,7 @@ class OpenWebUiRagService
      */
     public function getFileProcessingStatus(string $fileId, bool $stream = false): array
     {
-        $result = $this->client->get($this->url.'/v1/files/'.$fileId.'/process/status', [
+        $result = $this->client()->get($this->url.'/v1/files/'.$fileId.'/process/status', [
             'stream' => $stream,
         ]);
 
@@ -113,7 +133,7 @@ class OpenWebUiRagService
      */
     public function addFileToKnowledge(string $knowledgeId, string $fileId): array
     {
-        $result = $this->client->asJson()->post($this->url.'/v1/knowledge/'.$knowledgeId.'/file/add', [
+        $result = $this->client()->asJson()->post($this->url.'/v1/knowledge/'.$knowledgeId.'/file/add', [
             'file_id' => $fileId,
         ]);
 
@@ -161,6 +181,32 @@ class OpenWebUiRagService
     }
 
     /**
+     * Sendet eine Chat Completion mit mehreren Dateien
+     *
+     * @param  string  $model  Das zu verwendende Modell
+     * @param  array  $messages  Die Chat-Nachrichten
+     * @param  string[]  $fileIds  Die IDs der Dateien
+     *
+     * @throws \Exception
+     */
+    public function chatWithFiles(string $model, array $messages, array $fileIds): array
+    {
+        $files = array_map(fn (string $id) => ['type' => 'file', 'id' => $id], $fileIds);
+
+        $result = $this->client(300)->asJson()->post($this->url.'/chat/completions', [
+            'model' => $model,
+            'messages' => $messages,
+            'files' => $files,
+        ]);
+
+        if (! $result->successful()) {
+            throw new \Exception('Chat Completion fehlgeschlagen: '.$result->status().' - '.$result->body());
+        }
+
+        return $result->json();
+    }
+
+    /**
      * Sendet eine Chat Completion mit einer einzelnen Datei
      *
      * @param  string  $model  Das zu verwendende Modell
@@ -171,7 +217,7 @@ class OpenWebUiRagService
      */
     public function chatWithFile(string $model, array $messages, string $fileId): array
     {
-        $result = $this->client->asJson()->post($this->url.'/chat/completions', [
+        $result = $this->client(300)->asJson()->post($this->url.'/chat/completions', [
             'model' => $model,
             'messages' => $messages,
             'files' => [
@@ -197,7 +243,7 @@ class OpenWebUiRagService
      */
     public function chatWithCollection(string $model, array $messages, string $collectionId): array
     {
-        $result = $this->client->asJson()->post($this->url.'/chat/completions', [
+        $result = $this->client(300)->asJson()->post($this->url.'/chat/completions', [
             'model' => $model,
             'messages' => $messages,
             'files' => [
@@ -221,7 +267,7 @@ class OpenWebUiRagService
      */
     public function deleteFile(string $fileId): void
     {
-        $result = $this->client->delete($this->url.'/v1/files/'.$fileId);
+        $result = $this->client()->delete($this->url.'/v1/files/'.$fileId);
 
         if (! $result->successful()) {
             throw new \Exception('Löschen der Datei fehlgeschlagen: '.$result->status().' - '.$result->body());
@@ -241,7 +287,7 @@ class OpenWebUiRagService
     {
         $url = $this->url.'/v1/knowledge/'.$knowledgeId.'/file/remove';
 
-        $result = $this->client->asJson()
+        $result = $this->client()->asJson()
             ->withQueryParameters(['delete_file' => $deleteFile])
             ->post($url, [
                 'file_id' => $fileId,
@@ -269,10 +315,10 @@ class OpenWebUiRagService
         $url = $this->url.'/v1/knowledge/reindex';
 
         if ($knowledgeId) {
-            $result = $this->client->withQueryParameters(['knowledge_id' => $knowledgeId])
+            $result = $this->client()->withQueryParameters(['knowledge_id' => $knowledgeId])
                 ->post($url);
         } else {
-            $result = $this->client->post($url);
+            $result = $this->client()->post($url);
         }
 
         if (! $result->successful()) {
@@ -297,10 +343,10 @@ class OpenWebUiRagService
         $url = $this->url.'/v1/knowledge/metadata/reindex';
 
         if ($knowledgeId) {
-            $result = $this->client->withQueryParameters(['knowledge_id' => $knowledgeId])
+            $result = $this->client()->withQueryParameters(['knowledge_id' => $knowledgeId])
                 ->post($url);
         } else {
-            $result = $this->client->post($url);
+            $result = $this->client()->post($url);
         }
 
         if (! $result->successful()) {
