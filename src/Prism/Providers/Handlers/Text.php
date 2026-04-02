@@ -82,7 +82,17 @@ class Text
                 ]),
             ]);
 
-        return $response->json();
+        $data = $response->json();
+
+        if (! is_array($data)) {
+            throw new PrismException(sprintf(
+                'OpenAICompletions: Invalid JSON response (status: %d, body: %s)',
+                $response->status(),
+                mb_substr((string) $response->body(), 0, 1000)
+            ));
+        }
+
+        return $data;
     }
 
     /**

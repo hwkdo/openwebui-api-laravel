@@ -84,8 +84,8 @@ class OpenWebUiUserService
         // Zuerst aktuelle Settings abrufen, um bestehende Werte zu behalten
         $currentSettings = $this->getUserSettings($userToken);
 
-        // System-Prompt generieren
-        $systemPrompt = $this->generateSystemPrompt($user);
+        // System-Prompt generieren (gleiche Logik wie prism-chat / API-Clients)
+        $systemPrompt = $this->buildSystemPromptForUser($user);
 
         // Bestehende UI-Settings übernehmen und nur "system" ändern
         $existingUi = $currentSettings['ui'] ?? [];
@@ -96,6 +96,15 @@ class OpenWebUiUserService
         ];
 
         $this->updateUserSettings($userToken, $settings);
+    }
+
+    /**
+     * Derselbe System-Prompt wie bei {@see setSystemPrompt()} nach Open Web UI geschrieben wird,
+     * ohne API-Roundtrip (Konfiguration + User-Daten).
+     */
+    public function buildSystemPromptForUser(User $user): string
+    {
+        return $this->generateSystemPrompt($user);
     }
 
     /**
@@ -120,8 +129,8 @@ class OpenWebUiUserService
 
         // Haupt-Template mit User-Daten füllen
         $prompt = str_replace(
-            ['{vorname}', '{nachname}', '{gvp_part}'],
-            [$user->vorname ?? '', $user->nachname ?? '', $gvpPart],
+            ['{vorname}', '{nachname}', '{gvp_part}', '{user_id}'],
+            [$user->vorname ?? '', $user->nachname ?? '', $gvpPart, (string) $user->getKey()],
             $template
         );
 
