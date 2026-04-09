@@ -19,12 +19,20 @@ class OpenWebUiRagService
      * asJson(), withQueryParameters() etc. permanent mutiert (Laravel nutzt tap($this, ...)),
      * was bei Singletons zu akkumulierten Query-Params und falschen Content-Types führt.
      */
-    private function client(int $timeout = 30): \Illuminate\Http\Client\PendingRequest
+    private function client(int $timeout = 30, ?string $bearerToken = null, ?int $connectTimeoutSeconds = null): \Illuminate\Http\Client\PendingRequest
     {
-        return Http::withHeaders([
-            'Authorization' => 'Bearer '.config('openwebui-api-laravel.api_key'),
+        $token = $bearerToken ?? config('openwebui-api-laravel.api_key');
+
+        $request = Http::withHeaders([
+            'Authorization' => 'Bearer '.$token,
             'Accept' => 'application/json',
         ])->timeout($timeout);
+
+        if ($connectTimeoutSeconds !== null && $connectTimeoutSeconds > 0) {
+            $request = $request->connectTimeout($connectTimeoutSeconds);
+        }
+
+        return $request;
     }
 
     /**
@@ -36,19 +44,24 @@ class OpenWebUiRagService
      *
      * @throws \Exception
      */
-    public function uploadFile(string $filePath, bool $process = true, bool $processInBackground = true): array
+    public function uploadFile(string $filePath, bool $process = true, bool $processInBackground = true, ?string $bearerToken = null): array
     {
         if (! file_exists($filePath)) {
             throw new \Exception("Datei nicht gefunden: {$filePath}");
         }
 
+        $token = $bearerToken ?? config('openwebui-api-laravel.api_key');
+
         // Query-Params direkt in die URL einbauen – withQueryParameters() nach attach()
         // kann den Attachment-State im PendingRequest verlieren.
-        $query = http_build_query(array_filter([
-            'process' => $process ? 'true' : null,
-            'process_in_background' => $processInBackground ? 'true' : null,
-        ]));
-        $url = $this->url.'/v1/files/'.($query ? '?'.$query : '');
+        // WICHTIG: process muss explizit als "false" gesendet werden. array_filter(null)
+        // ließ den Param zuvor weg → Open WebUI hat standardmäßig RAG/Text-Extraktion
+        // ausgeführt (bei Scan-PDFs: leerer Text → ValueError EMPTY_CONTENT).
+        $query = http_build_query([
+            'process' => $process ? 'true' : 'false',
+            'process_in_background' => $processInBackground ? 'true' : 'false',
+        ]);
+        $url = $this->url.'/v1/files/?'.$query;
 
         $fileContents = file_get_contents($filePath);
         if ($fileContents === false || $fileContents === '') {
@@ -58,7 +71,7 @@ class OpenWebUiRagService
         // Frisches Http-Objekt – gespeicherter PendingRequest ($this->client) kann
         // bei Multipart-Uploads internen State aus vorherigen Anfragen mitschleppen.
         $result = Http::withHeaders([
-            'Authorization' => 'Bearer '.config('openwebui-api-laravel.api_key'),
+            'Authorization' => 'Bearer '.$token,
             'Accept' => 'application/json',
         ])
             ->attach('file', $fileContents, basename($filePath))
@@ -207,23 +220,151 @@ class OpenWebUiRagService
     }
 
     /**
-     * Sendet eine Chat Completion mit einer einzelnen Datei
+     * Vision ohne OWUI-„files“-RAG: Open WebUI hängt bei {@see chatWithFile} Dateien an die RAG-Pipeline
+     * ({@code chat_completion_files_handler}) und kann völlig fremden Kontext aus der Vector-DB in den Prompt
+     * injizieren — das Modell sieht dann oft kein echtes Bild. Diese Methode entspricht eher der UI: eine
+     * User-Nachricht mit Text + data-URL-Bild (OpenAI-Multimodal), Ollama erhält Base64 in {@code images}.
      *
-     * @param  string  $model  Das zu verwendende Modell
-     * @param  array  $messages  Die Chat-Nachrichten
-     * @param  string  $fileId  Die ID der Datei
+     * @param  array<string, mixed>  $additionalPayload  Zusätzliche Top-Level-Felder; {@code params} wird mit num_ctx gemerged (OWUI setzt daraus Ollama-options)
+     * @param  int|null  $httpRequestTimeoutSeconds  Gesamt-Timeout für die HTTP-Anfrage (null = vision_chat_timeout aus Config)
+     * @param  int|null  $httpConnectTimeoutSeconds  Connect-Timeout (null = vision_chat_connect_timeout aus Config)
      *
      * @throws \Exception
      */
-    public function chatWithFile(string $model, array $messages, string $fileId): array
-    {
-        $result = $this->client(300)->asJson()->post($this->url.'/chat/completions', [
+    public function chatWithImageFilePath(
+        string $model,
+        string $userTextPrompt,
+        string $absoluteImagePath,
+        ?string $bearerToken = null,
+        array $additionalPayload = [],
+        ?int $httpRequestTimeoutSeconds = null,
+        ?int $httpConnectTimeoutSeconds = null,
+    ): array {
+        if (! is_readable($absoluteImagePath)) {
+            throw new \Exception('Bilddatei nicht lesbar: '.$absoluteImagePath);
+        }
+
+        $raw = file_get_contents($absoluteImagePath);
+        if ($raw === false || $raw === '') {
+            throw new \Exception('Bilddatei ist leer oder nicht lesbar.');
+        }
+
+        $mime = @mime_content_type($absoluteImagePath);
+        if (! is_string($mime) || ! str_starts_with($mime, 'image/')) {
+            $mime = match (strtolower((string) pathinfo($absoluteImagePath, PATHINFO_EXTENSION))) {
+                'png' => 'image/png',
+                'jpg', 'jpeg' => 'image/jpeg',
+                'webp' => 'image/webp',
+                'gif' => 'image/gif',
+                default => 'image/png',
+            };
+        }
+
+        $dataUrl = 'data:'.$mime.';base64,'.base64_encode($raw);
+
+        $messages = [
+            [
+                'role' => 'user',
+                'content' => [
+                    ['type' => 'text', 'text' => $userTextPrompt],
+                    ['type' => 'image_url', 'image_url' => ['url' => $dataUrl]],
+                ],
+            ],
+        ];
+
+        return $this->postVisionChatCompletion($model, $messages, $bearerToken, $additionalPayload, $httpRequestTimeoutSeconds, $httpConnectTimeoutSeconds);
+    }
+
+    /**
+     * Sendet eine Chat Completion mit einer einzelnen Datei (OpenWebUI-Dateireferenz — triggert ggf. RAG).
+     *
+     * @param  array<string, mixed>  $additionalPayload  Zusätzliche Felder; {@code params} wird mit num_ctx gemerged
+     *
+     * @throws \Exception
+     */
+    public function chatWithFile(
+        string $model,
+        array $messages,
+        string $fileId,
+        ?string $bearerToken = null,
+        array $additionalPayload = [],
+    ): array {
+        // Open Web UI (Ollama): request-„params“ werden zu form_data.options; Top-Level „options“ kann dabei mit [] überschrieben werden.
+        $params = array_merge(
+            [
+                'num_ctx' => (int) config('openwebui-api-laravel.ocr_num_ctx', 32768),
+            ],
+            $additionalPayload['params'] ?? [],
+        );
+        unset($additionalPayload['params']);
+
+        $body = array_merge([
             'model' => $model,
             'messages' => $messages,
             'files' => [
                 ['type' => 'file', 'id' => $fileId],
             ],
-        ]);
+            'stream' => false,
+            'max_tokens' => (int) config('openwebui-api-laravel.ocr_max_tokens', 8192),
+            'params' => $params,
+        ], $additionalPayload);
+
+        return $this->postChatCompletionsJson($body, $bearerToken);
+    }
+
+    /**
+     * @param  array<string, mixed>  $messages  OpenAI-kompatible messages (inkl. Multimodal-Content)
+     * @param  array<string, mixed>  $additionalPayload
+     * @param  int|null  $httpRequestTimeoutSeconds  null = vision_chat_timeout aus Config
+     * @param  int|null  $httpConnectTimeoutSeconds  null = vision_chat_connect_timeout aus Config
+     *
+     * @throws \Exception
+     */
+    public function postVisionChatCompletion(
+        string $model,
+        array $messages,
+        ?string $bearerToken = null,
+        array $additionalPayload = [],
+        ?int $httpRequestTimeoutSeconds = null,
+        ?int $httpConnectTimeoutSeconds = null,
+    ): array {
+        $params = array_merge(
+            [
+                'num_ctx' => (int) config('openwebui-api-laravel.ocr_num_ctx', 32768),
+            ],
+            $additionalPayload['params'] ?? [],
+        );
+        unset($additionalPayload['params']);
+
+        $body = array_merge([
+            'model' => $model,
+            'messages' => $messages,
+            'stream' => false,
+            'max_tokens' => (int) config('openwebui-api-laravel.ocr_max_tokens', 8192),
+            'params' => $params,
+        ], $additionalPayload);
+
+        return $this->postChatCompletionsJson($body, $bearerToken, $httpRequestTimeoutSeconds, $httpConnectTimeoutSeconds);
+    }
+
+    /**
+     * @param  array<string, mixed>  $body
+     * @param  int|null  $requestTimeoutSeconds  null = vision_chat_timeout aus Config
+     * @param  int|null  $connectTimeoutSeconds  null = vision_chat_connect_timeout aus Config
+     *
+     * @throws \Exception
+     */
+    protected function postChatCompletionsJson(
+        array $body,
+        ?string $bearerToken = null,
+        ?int $requestTimeoutSeconds = null,
+        ?int $connectTimeoutSeconds = null,
+    ): array {
+        $timeout = $requestTimeoutSeconds ?? (int) config('openwebui-api-laravel.vision_chat_timeout', 600);
+        $connect = $connectTimeoutSeconds ?? (int) config('openwebui-api-laravel.vision_chat_connect_timeout', 30);
+        $connectForClient = $connect > 0 ? $connect : null;
+
+        $result = $this->client($timeout, $bearerToken, $connectForClient)->asJson()->post($this->url.'/chat/completions', $body);
 
         if (! $result->successful()) {
             throw new \Exception('Chat Completion fehlgeschlagen: '.$result->status().' - '.$result->body());
@@ -265,9 +406,9 @@ class OpenWebUiRagService
      *
      * @throws \Exception
      */
-    public function deleteFile(string $fileId): void
+    public function deleteFile(string $fileId, ?string $bearerToken = null): void
     {
-        $result = $this->client()->delete($this->url.'/v1/files/'.$fileId);
+        $result = $this->client(30, $bearerToken)->delete($this->url.'/v1/files/'.$fileId);
 
         if (! $result->successful()) {
             throw new \Exception('Löschen der Datei fehlgeschlagen: '.$result->status().' - '.$result->body());
