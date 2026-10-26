@@ -21,6 +21,7 @@ use Prism\Prism\Streaming\Events\StreamStartEvent;
 use Prism\Prism\Streaming\Events\TextCompleteEvent;
 use Prism\Prism\Streaming\Events\TextDeltaEvent;
 use Prism\Prism\Streaming\Events\TextStartEvent;
+use Prism\Prism\Streaming\Events\ThinkingEvent;
 use Prism\Prism\Streaming\Events\ToolCallEvent;
 use Prism\Prism\Text\Request;
 use Prism\Prism\ValueObjects\Messages\AssistantMessage;
@@ -42,6 +43,7 @@ class Stream
         'promptTokens' => 0,
         'completionTokens' => 0,
         'toolCalls' => [],
+        'reasoningId' => null,
     ];
 
     public function __construct(protected PendingRequest $client)
@@ -162,9 +164,22 @@ class Stream
                 }
             }
 
-            // Handle text content
-            $content = data_get($delta, 'content', '');
-            if ($content !== '') {
+            $reasoning = data_get($delta, 'reasoning_content');
+            if (is_string($reasoning) && $reasoning !== '') {
+                if (! is_string($this->state['reasoningId'])) {
+                    $this->state['reasoningId'] = EventID::generate();
+                }
+
+                yield new ThinkingEvent(
+                    id: EventID::generate(),
+                    timestamp: time(),
+                    delta: $reasoning,
+                    reasoningId: $this->state['reasoningId'],
+                );
+            }
+
+            $content = data_get($delta, 'content');
+            if (is_string($content) && $content !== '') {
                 if (! $this->state['textStarted']) {
                     $this->state['textStarted'] = true;
                     yield new TextStartEvent(
@@ -489,6 +504,7 @@ class Stream
             'promptTokens' => 0,
             'completionTokens' => 0,
             'toolCalls' => [],
+            'reasoningId' => null,
         ];
     }
 }
