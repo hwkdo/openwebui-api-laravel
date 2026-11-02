@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Hwkdo\OpenwebuiApiLaravel\Prism\Providers\Handlers;
 
 use Illuminate\Http\Client\PendingRequest;
+use Hwkdo\OpenwebuiApiLaravel\Prism\Providers\Maps\ToolMap;
 use Illuminate\Support\Arr;
 use Prism\Prism\Concerns\CallsTools;
 use Prism\Prism\Enums\FinishReason;
@@ -64,23 +65,30 @@ class Text
      */
     protected function sendRequest(Request $request): array
     {
+        $payload = [
+            'model' => $request->model(),
+            'messages' => $this->mapMessages(array_merge(
+                $request->systemPrompts(),
+                $request->messages()
+            )),
+            'stream' => false,
+            ...Arr::whereNotNull([
+                'temperature' => $request->temperature(),
+                'max_tokens' => $request->maxTokens(),
+                'top_p' => $request->topP(),
+            ]),
+        ];
+
+        $tools = ToolMap::map($request->tools());
+
+        if ($tools !== []) {
+            $payload['tools'] = $tools;
+        }
+
         /** @var \Illuminate\Http\Client\Response $response */
         $response = $this
             ->client
-            ->post('v1/chat/completions', [
-                'model' => $request->model(),
-                'messages' => $this->mapMessages(array_merge(
-                    $request->systemPrompts(),
-                    $request->messages()
-                )),
-                'tools' => $this->mapTools($request->tools()),
-                'stream' => false,
-                ...Arr::whereNotNull([
-                    'temperature' => $request->temperature(),
-                    'max_tokens' => $request->maxTokens(),
-                    'top_p' => $request->topP(),
-                ]),
-            ]);
+            ->post('v1/chat/completions', $payload);
 
         $data = $response->json();
 
@@ -256,19 +264,4 @@ class Text
         }, $messages);
     }
 
-    /**
-     * @param  array<int, \Prism\Prism\ValueObjects\Tool>  $tools
-     * @return array<int, array<string, mixed>>
-     */
-    protected function mapTools(array $tools): array
-    {
-        return array_map(fn ($tool) => [
-            'type' => 'function',
-            'function' => [
-                'name' => $tool->name(),
-                'description' => $tool->description(),
-                'parameters' => $tool->parametersAsArray(),
-            ],
-        ], $tools);
-    }
 }
