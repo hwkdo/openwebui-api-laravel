@@ -285,23 +285,9 @@ class Stream
     protected function parseNextDataLine(StreamInterface $stream): ?array
     {
         $line = $this->readLine($stream);
+        $jsonData = self::payloadFromSseLine($line);
 
-        if (trim($line) === '') {
-            return null;
-        }
-
-        // Handle SSE format: "data: {...}" or just "{...}"
-        $trimmedLine = trim($line);
-        
-        // Remove "data: " prefix if present
-        if (str_starts_with($trimmedLine, 'data: ')) {
-            $jsonData = substr($trimmedLine, 6);
-        } else {
-            // Some APIs send JSON directly without "data: " prefix
-            $jsonData = $trimmedLine;
-        }
-
-        if ($jsonData === '[DONE]' || $jsonData === '') {
+        if ($jsonData === null) {
             return null;
         }
 
@@ -315,6 +301,34 @@ class Stream
             }
             return null;
         }
+    }
+
+    /**
+     * SSE-Kommentare (`: heartbeat`) und Steuerzeilen sind kein JSON.
+     */
+    protected static function payloadFromSseLine(string $line): ?string
+    {
+        $trimmedLine = trim($line);
+
+        if ($trimmedLine === '' || str_starts_with($trimmedLine, ':')) {
+            return null;
+        }
+
+        if (preg_match('/^(event|id|retry):/i', $trimmedLine) === 1) {
+            return null;
+        }
+
+        if (str_starts_with($trimmedLine, 'data:')) {
+            $jsonData = trim(substr($trimmedLine, 5));
+        } else {
+            $jsonData = $trimmedLine;
+        }
+
+        if ($jsonData === '' || $jsonData === '[DONE]') {
+            return null;
+        }
+
+        return $jsonData;
     }
 
     /**
